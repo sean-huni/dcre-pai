@@ -1,0 +1,27 @@
+# 12FactorApp: committed working dev defaults; env overrides. (yml-only rule, configuration.md p19)
+spring:
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${DCRE_DB_URL:jdbc:postgresql://localhost:26257/dcre_col?sslmode=disable}
+    username: ${DCRE_DB_USER:root}
+    password: ${DCRE_DB_PASSWORD:}
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.xml
+    # Shared DB, per-service migration history (same isolation idea as PAI_BATCH_)
+    database-change-log-table: pai_databasechangelog
+    database-change-log-lock-table: pai_databasechangeloglock
+
+dcre:
+  batch:
+    table-prefix: PAI_BATCH_
+  agtops-db-url: ${DCRE_AGTOPS_DB_URL:jdbc:postgresql://localhost:26257/agt_ops?sslmode=disable}
+  agtops-db-user: ${DCRE_AGTOPS_DB_USER:root}
+  agtops-db-password: ${DCRE_AGTOPS_DB_PASSWORD:}
+  # Used only for the AGT outcome seam write (R-35); PAI does no boundary-file I/O (R-30).
+  exchange-root: ${DCRE_EXCHANGE_ROOT:../../../../../../infra/dcre-infra/exchange}
+  pai:
+    # SCRUM-42: verdict writes commit in bounded sequence slices; one giant
+    # serializable tx is unrefreshable at 300k tx (RETRY_SERIALIZABLE).
+    verdict-slice-size: ${DCRE_PAI_VERDICT_SLICE_SIZE:10000}

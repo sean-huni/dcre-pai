@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- PAI single writer (R-04). Per-transaction account-init verdict,
+         immutable once written (a rerun must not flip CREATED to EXISTS). -->
+    <changeSet id="001-pai-verdict-pai" author="dcre">
+        <sql>
+            CREATE TABLE IF NOT EXISTS pai_verdict (
+                id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+                arrival_id UUID NOT NULL,
+                sequence INT NOT NULL,
+                action VARCHAR(16) NOT NULL,
+                version BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (arrival_id, sequence)
+            ) -- action is EXISTS or CREATED
+        </sql>
+    </changeSet>
+
+</databaseChangeLog>
