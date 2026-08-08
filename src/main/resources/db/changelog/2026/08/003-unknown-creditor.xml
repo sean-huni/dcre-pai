@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- ============================================================================
+         SCRUM-107: PAI RECORDS THE CREDITORS IT COULD NOT FIND. IT DOES NOT INVENT
+         THEM IN SOMEBODY ELSE'S ACCOUNT MASTER.
+
+         PAI used to answer an absent creditor account with INSERT INTO account,
+         carrying hardcoded values taken from a toolkit SAMPLE file: product FNBRF,
+         acc_type CACC, branch 250205, ucn 100000000000, client_id 2, app_no mirroring
+         the account number, and a balance of 999999999.99 chosen, in its own words,
+         "generous so caps pass post-init".
+
+         That is not reference data. It is a sentinel with a fixed shape, and it was
+         being written into the relation the payments validator reads. PTV's account
+         tier now fails closed, so the two together made a loop: PTV rejects an unknown
+         creditor once, PAI mints it with a billion-rand balance, and every later
+         arrival to that creditor clears BOTH the existence tier and the cap tier
+         unconditionally, for ever. A control that a downstream stage can switch off,
+         one account at a time, is not a control.
+
+         The write therefore moves here, to a relation PAI owns, named for what the row
+         means. Nothing about it presupposes where the account master ends up living:
+         this table records an OBSERVATION PAI made ("this creditor was not in the
+         master when arrival X was initialised"), which stays true and stays PAI's
+         under every option.
+
+         PAI still READS the master to make that observation. That read is a separate
+         question and is deliberately untouched here: a context that cannot control
+         writes to a relation does not own it, and PAI now writes none.
+
+         UNGUARDED, matching 001-pai.xml and the v1 baselines elsewhere in the estate:
+         PAI is the only creator, so a tableExists MARK_RAN guard could never fire, and
+         a guard that cannot fire is not free. It would silently SKIP the create on the
+         day the assumption stopped holding, turning a loud startup failure into a
+         table that is quietly missing.
+         ============================================================================ -->
+
+    <changeSet id="003-unknown-creditor-pai" author="dcre">
+        <createTable tableName="unknown_creditor">
+            <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <!-- Names the account master's own column, so the no-host-prefix rule
+                 exempts it: the host here is unknown_creditor. -->
+            <column name="account_number" type="VARCHAR(34)">
+                <constraints nullable="false" unique="true"
+                             uniqueConstraintName="uq_unknown_creditor_account_number"/>
+            </column>
+            <!-- The arrival during which this creditor was FIRST observed to be absent.
+                 The row is insert-once (ON CONFLICT DO NOTHING), so a later arrival
+                 crediting the same account does not overwrite the first sighting. -->
+            <column name="arrival_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+</databaseChangeLog>

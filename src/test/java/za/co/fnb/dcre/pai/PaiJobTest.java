@@ -85,8 +85,13 @@ class PaiJobTest {
                 + " AND action='EXISTS'", Integer.class, arrival));
         assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM pai_verdict WHERE arrival_id=?"
                 + " AND action='CREATED'", Integer.class, arrival));
-        assertEquals(accountsBefore + 2, jdbc.queryForObject(
-                "SELECT count(*) FROM account", Integer.class), "exactly the 2 unknown creditors minted (R-11)");
+        // SCRUM-107: the account master is READ, never written. The two absent creditors
+        // are recorded in PAI's own relation instead.
+        assertEquals(accountsBefore, jdbc.queryForObject(
+                "SELECT count(*) FROM account", Integer.class), "PAI writes no row into the account master");
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM unknown_creditor WHERE arrival_id=?",
+                        Integer.class, arrival),
+                "exactly the 2 absent creditors recorded, in the relation PAI owns");
 
         JobExecution rerun = jobOperator.start(paiJob, new JobParametersBuilder()
                 .addString("arrival.id", arrival.toString(), true)
@@ -96,8 +101,11 @@ class PaiJobTest {
                 + " AND action='EXISTS'", Integer.class, arrival), "verdicts immutable: no CREATED->EXISTS flip");
         assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM pai_verdict WHERE arrival_id=?"
                 + " AND action='CREATED'", Integer.class, arrival), "verdicts immutable: rerun keeps CREATED");
-        assertEquals(accountsBefore + 2, jdbc.queryForObject(
-                "SELECT count(*) FROM account", Integer.class), "rerun mints no duplicate accounts (R-05)");
+        assertEquals(accountsBefore, jdbc.queryForObject(
+                "SELECT count(*) FROM account", Integer.class), "a rerun writes no row into the master either");
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM unknown_creditor WHERE arrival_id=?",
+                        Integer.class, arrival),
+                "rerun records no duplicate sighting: insert-once on the account number (R-05)");
     }
 
     @Test

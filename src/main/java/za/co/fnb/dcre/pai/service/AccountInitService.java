@@ -9,6 +9,7 @@ import za.co.fnb.dcre.pai.data.model.CreditorRef;
 import za.co.fnb.dcre.pai.data.repo.AccountRepo;
 import za.co.fnb.dcre.pai.data.repo.PaiVerdictRepo;
 import za.co.fnb.dcre.pai.data.repo.TxEntryRepo;
+import za.co.fnb.dcre.pai.data.repo.UnknownCreditorRepo;
 
 import java.util.List;
 import java.util.UUID;
@@ -16,10 +17,23 @@ import java.util.UUID;
 /**
  * Business tier: post-CTV account init for the ENDO Payments flow
  * (CRR -> CTV -> PAI -> CIR, SCRUM-69; DB-only, R-30).
- * For every spine transaction of the arrival: creditor account exists ->
- * verdict EXISTS; absent -> idempotent create (R-11) -> verdict CREATED.
- * Verdicts are immutable (insert-if-absent), so a rerun never flips
- * CREATED to EXISTS. An all-exist run is a valid no-op (A-7).
+ * For every spine transaction of the arrival: creditor account present in the
+ * account master -> verdict EXISTS; absent -> the sighting is recorded in PAI's
+ * own unknown_creditor relation -> verdict CREATED. Verdicts are immutable
+ * (insert-if-absent), so a rerun never flips CREATED to EXISTS. An all-exist run
+ * is a valid no-op (A-7).
+ *
+ * <p><b>SCRUM-107: the absent branch no longer writes the account master.</b> It used
+ * to INSERT a hardcoded row there, so PAI answered "this account does not exist" by
+ * making it exist, in a relation PAI does not own and PTV validates against. The
+ * counts this returns are consequently now a pure function of the master's contents
+ * rather than of how many times PAI has run: before the change, a first run reported
+ * CREATED and the next reported EXISTS for the same account, because the first run had
+ * put it there.
+ *
+ * <p>The verdict VALUES are left alone. {@code CREATED} is read by PRW and PRG as a
+ * cross-service contract, and renaming it to match what the branch now does is a change
+ * to their repositories, not this one. It is recorded in the SCRUM-107 report.
  *
  * <p>SCRUM-42 load fix: a 300k-tx arrival written in ONE serializable
  * transaction (~600k statements) is unrefreshable; CRDB aborts it with
@@ -41,15 +55,18 @@ public class AccountInitService {
 
     private final TxEntryRepo entries;
     private final AccountRepo accounts;
+    private final UnknownCreditorRepo unknownCreditors;
     private final PaiVerdictRepo verdicts;
     private final TransactionTemplate sliceTx;
     private final int sliceSize;
 
     public AccountInitService(final TxEntryRepo entries, final AccountRepo accounts,
+                              final UnknownCreditorRepo unknownCreditors,
                               final PaiVerdictRepo verdicts, final PlatformTransactionManager txManager,
                               @Value("${dcre.pai.verdict-slice-size:10000}") final int sliceSize) {
         this.entries = entries;
         this.accounts = accounts;
+        this.unknownCreditors = unknownCreditors;
         this.verdicts = verdicts;
         // Each slice commits in its OWN transaction so a 300k-tx arrival
         // ratchets progress slice by slice; and a CRDB 40001 abort poisons the
@@ -94,7 +111,7 @@ public class AccountInitService {
                 verdicts.insertIfAbsent(arrivalId, ref.sequence(), "EXISTS");
                 existing++;
             } else {
-                accounts.createIfAbsent(ref.creditorAccount());
+                unknownCreditors.recordIfAbsent(arrivalId, ref.creditorAccount());
                 verdicts.insertIfAbsent(arrivalId, ref.sequence(), "CREATED");
                 created++;
             }

@@ -29,17 +29,27 @@
          migrating first now fails loudly and immediately, naming the missing relation
          instead of inventing a wrong one. That is the correct failure.
 
-         THE OPEN EDGE, recorded rather than left to be discovered: nothing creates
-         account in dcre_pay at all, because nothing should. AccountRepo still issues
-         INSERT INTO account against the primary datasource, so PAI cannot complete a
-         run against a real dcre_pay until acs ships and AccountRepo is repointed at
-         the acs datasource. That repointing is owned elsewhere and is deliberately
-         NOT worked around here with a mint, because a mint is what put PAI's schema
-         in the wrong database in the first place. Integration tests stand all three
-         relations up from src/test/resources/db/changelog/test/001-read-sources.xml.
+         THE WRITE SIDE IS NOW CLOSED. PAI issued INSERT INTO account against its
+         primary datasource, which is a write-ownership violation whichever database
+         that datasource points at, and no published view can fix it: a context that
+         cannot control writes to a relation does not own it. Those writes were
+         synthetic sentinels with hardcoded toolkit-sample values, not reference data,
+         so they moved to a PAI-owned relation named for what they mean,
+         unknown_creditor (003-unknown-creditor.xml). Nothing here presupposes where
+         the account master ends up.
+
+         THE OPEN EDGE that remains, recorded rather than left to be discovered:
+         nothing creates account in dcre_pay, and PAI still READS it to decide whether
+         a creditor is known. So PAI cannot complete a run against a real dcre_pay
+         until the account master has a home and this READ is repointed at it. That is
+         deliberately NOT worked around with a mint, because a mint is what put PAI's
+         schema in the wrong database in the first place, and it now fails loudly and
+         immediately, naming the missing relation. Integration tests stand the read
+         sources up from src/test/resources/db/changelog/test/001-read-sources.xml.
          ============================================================================ -->
 
     <include file="db/changelog/2026/07/001-pai.xml"/>
     <include file="db/changelog/2026/07/002-batch-metadata.xml"/>
+    <include file="db/changelog/2026/08/003-unknown-creditor.xml"/>
 
 </databaseChangeLog>

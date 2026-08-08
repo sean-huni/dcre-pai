@@ -21,12 +21,13 @@
                                                           its own dcre_acs database
 
          account is the one to watch. PAI used to mint it into its own datasource, so a
-         clean clone created the table and then wrote rows into it. That mint is gone
-         from the shipped changelog because PAI does not own the relation and dcre_pay
-         is not where it will live. Until acs ships and AccountRepo is repointed at the
-         acs datasource, PAI's code still issues INSERT INTO account against its primary
-         datasource, so this fixture must keep creating it or every PAI test fails on an
-         absent relation. That is a deliberate, recorded gap, not an oversight: see the
+         clean clone created the table and then wrote rows into it. Both halves are now
+         gone: the create left the shipped changelog earlier in SCRUM-107, and the WRITE
+         left AccountRepo with it, because a context that cannot control writes to a
+         relation does not own it. What remains is a READ, the probe that asks whether a
+         creditor is known, so this fixture must keep creating the table or every PAI
+         test fails on an absent relation. Where that probe should point is the open
+         account-model decision: a deliberate, recorded gap, not an oversight. See the
          ordering contract in README.md and in db.changelog-master.xml.
 
          THIS IS A HAND-MAINTAINED MIRROR OF ANOTHER REPOSITORY'S DDL, which is a drift
@@ -191,11 +192,12 @@
          the toolkit's account DDL (fnb_dcre_ctv_toolkit/samples/dcre_accounts_sample.sql)
          cannot be expressed in typed XML. Confined to a test fixture that never ships.
 
-         They are worth carrying rather than dropping: PAI mints FNBRF accounts with a
-         balance and no credit limit, so chk_account_product_amount is exactly the
-         constraint a mint defect would violate. A fixture that dropped them would
-         accept rows the real table rejects, which is a fixture that cannot fail for
-         the reason the code can. -->
+         They are worth carrying rather than dropping even though PAI no longer mints
+         anything here: the tests seed known accounts through this table, and a fixture
+         with weaker constraints than the real relation accepts rows the real one
+         rejects, which is a fixture that cannot fail for a reason the code can. The
+         constraint that used to matter most, chk_account_product_amount, is the one
+         PAI's own mint would have violated, and the mint is what SCRUM-107 removed. -->
     <changeSet id="pai-testfixture-account-checks" author="dcre">
         <sql>
             ALTER TABLE account ADD CONSTRAINT chk_account_product
