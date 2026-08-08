@@ -2,26 +2,30 @@
 
 Account Init Service (ENDO): the account-init verdict applier and the fleet's single writer of the `account` table (R-04).
 
-## Rename status (SCRUM-107): what is and is not wired yet
+## Rename status (SCRUM-107): cut over
 
 This repository is `dcre-ais` cloned and renamed to the name the payments REQ sheet has always
 given this box, `PAI`, captioned "Account Init Service (ENDO)". The diagrams are the specification
 (`design-register/CLAUDE.md`), and `ais` was this service under the wrong name.
 
-The rename is complete INSIDE this repository and deliberately stops at its boundary. Three things
-are still true of the running fleet and are NOT this repo's to change:
+The fleet side of the rename has since landed. Verified against the AGT sources on 2026-08-08:
 
-| Fact | State | Owner of the change |
-|---|---|---|
-| `RouteDags.ENDO` is `CRR -> CTV -> AIS -> CIR` | still names `Stage.AIS` | AGT, later sequencing step |
-| `AGT_PAI_IMAGE` / `Stage.PAI` | do not exist yet; AGT knows only `AGT_AIS_IMAGE` | AGT, applied in one pass |
-| `crw` reads `ais_verdict` on the pay arm | unchanged, so `dcre-ais` remains the live producer | CRW owner |
+| Fact | State |
+|---|---|
+| `RouteDags.ENDO` | `PRR -> PTV -> PAI -> fork {PRW, PIR}`, every stage a payments one |
+| `Stage.PAI` / `AGT_PAI_IMAGE` | both exist; the pre-cutover `Stage.AIS` and `AGT_AIS_IMAGE` are gone |
+| The pay-arm eligibility gate | `prw`'s `DueSql` counts rows in `pai_verdict`; `crw` is collections-only |
 
-**This service is therefore not yet launchable as `PAI`, and `dcre-ais` is still the deployed
-account-init stage.** `pai_verdict` here is a fresh table, not a rename of the live `ais_verdict`:
-`crw`'s pay-flow eligibility gate counts rows in `ais_verdict`
-(`DueSql.PAY_DUE_GATES`), so nothing may drop or rename that table until CRW is repointed.
-The database also stays `dcre_col`; the payments family's own `dcre_pay` does not exist yet.
+`pai_verdict` is this service's own table and `prw` is its consumer. The `ais_verdict` name survives
+only in `prw`'s guard tests, which assert that the old name is NOT read (reading it would silently
+count nothing), and in `crw`'s note that no changelog in the estate ever created it.
+
+**The database is `dcre_pay`, the payments family's own.** It said `dcre_col` here until SCRUM-107,
+because this repo is `dcre-ais` cloned and the collections datasource came across unchanged. That was
+not a stale string: `AccountRepo` issues `INSERT INTO account`, so a clean clone built the entire PAI
+schema and its `pai_databasechangelog` inside the COLLECTIONS database and wrote account rows there,
+with no error at all. The write is perfectly valid against the wrong database, which is precisely why
+nothing caught it.
 
 ## What it does
 
@@ -37,11 +41,35 @@ Spring Boot 4.1.0 / Spring Batch 6 / Java 25, run as a short-lived one-shot proc
 
 Persistence notes: `AccountRepo` extends `Repository`, not `CrudRepository` (the derived `save()` path cannot satisfy the shared table's NOT NULL contract from the minimal `AccountEntity`; only targeted exists/create queries are exposed). Minted accounts carry SYNTHETIC-CONTRACT dev defaults per the toolkit fixture DDL (R-35): `product_code FNBRF`, `acc_type CACC`, `balance 999999999.99`, `process_status ACTIVE`, `status AAUT`, `branch_code 250205`, `ucn 100000000000`, `client_id 2`, `app_no` mirrors the account number.
 
-Liquibase XML changelog master, per-service history tables `pai_databasechangelog` / `pai_databasechangeloglock` on the shared `dcre_col` DB:
+Liquibase XML changelog master, per-service history tables `pai_databasechangelog` / `pai_databasechangeloglock` in `dcre_pay`:
 
-1. `000-bootstrap.xml`: bootstrap-order guards. PAI does not own `account` (the fixture toolkit seeds it in dev) but may run on a fresh DB first, so `account`, `tx_header` and `tx_entry` are created via `CREATE TABLE IF NOT EXISTS` (raw SQL changesets, not typed Liquibase tags) with the owners' exact DDL.
-2. `001-pai.xml`: `pai_verdict`, `UNIQUE (arrival_id, sequence)`, `action` is `EXISTS` or `CREATED` (also a raw-SQL changeset).
-3. `002-batch-metadata.xml`: Spring Batch metadata under prefix `PAI_BATCH_` (`initialize-schema: never`), loaded from `batch-metadata-pai.sql` via `<sqlFile>`.
+1. `001-pai.xml`: `pai_verdict`, `UNIQUE (arrival_id, sequence)`, `action` is `EXISTS` or `CREATED`. Typed Liquibase tags, created unguarded.
+2. `002-batch-metadata.xml`: Spring Batch metadata under prefix `PAI_BATCH_` (`initialize-schema: never`), loaded from `batch-metadata-pai.sql` via `<sqlFile>`.
+
+**PAI no longer creates its read sources, and that is an ordering contract.** `000-bootstrap.xml` is
+deleted. It bootstrap-minted three relations PAI does not own, in unguarded raw-SQL blocks, so that
+PAI could run on a fresh database before their owners ever had: `tx_header` and `tx_entry` (PRR owns
+them, R-04 single writer) and `account`. PRR's baseline creates its two unguarded, so a PAI mint that
+won the race would crashloop PRR on "relation already exists"; the mint was also a hand-copied mirror
+nothing compared against the owner, so PAI's suite could stay green against a column set PRR had
+already changed. **PAI's migration must therefore run AFTER PRR's.** On a fresh `dcre_pay`, PAI
+migrating first now fails loudly and names the missing relation instead of inventing a wrong one.
+This is the retirement `collections/crg` performed first, copied rather than reinvented.
+
+**Open edge, recorded rather than left to be discovered:** nothing creates `account` in `dcre_pay`,
+because nothing should. A new `acs` service is being built to own it in its own `dcre_acs` database.
+`AccountRepo` still issues `INSERT INTO account` against the primary datasource, so PAI cannot
+complete a run against a real `dcre_pay` until `acs` ships and `AccountRepo` is repointed. That
+repointing is owned elsewhere and is deliberately not worked around here with a mint, because a mint
+is what put PAI's schema in the wrong database to begin with.
+
+`pai_verdict` is the relation `prw` reads: `prw`'s `DueSql.DUE_GATES` counts rows in it against
+`dcre_pay`, and `001-pai.xml` is the only thing in the estate that creates it. That is why the
+`dcre_col` default was fatal rather than untidy.
+
+Integration tests stand the read sources up from
+`src/test/resources/db/changelog/test/001-read-sources.xml`, reached through
+`db.changelog-test-master.xml`, which then runs the production master unchanged.
 
 ## Prerequisites
 
@@ -51,7 +79,7 @@ Liquibase XML changelog master, per-service history tables `pai_databasechangelo
 
 ## Quickstart
 
-Clean clone, no `.env`: committed defaults target `localhost:26257/dcre_col`; env vars override.
+Clean clone, no `.env`: committed defaults target `localhost:26257/dcre_pay`; env vars override.
 
 ```bash
 # 1. Publish the platform libs to Maven Local (once). Run ./gradlew publishToMavenLocal
@@ -69,7 +97,7 @@ java -jar build/libs/pai-2.0.jar arrival.id=<uuid>
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `DCRE_DB_URL` | `jdbc:postgresql://localhost:26257/dcre_col?sslmode=disable` | CockroachDB via pgwire |
+| `DCRE_DB_URL` | `jdbc:postgresql://localhost:26257/dcre_pay?sslmode=disable` | The payments CockroachDB via pgwire. AGT injects this exact name into every stage Job and routes the value per family. |
 | `DCRE_DB_USER` | `root` | DB user |
 | `DCRE_DB_PASSWORD` | (empty) | DB password |
 | `DCRE_EXCHANGE_ROOT` | `../../../../../../infra/dcre-infra/exchange` | Outcome seam write only (no business file I/O, R-30) |

@@ -22,7 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-@SpringBootTest(properties = {"spring.batch.job.enabled=false",
+@SpringBootTest(properties = {
+        // SCRUM-107: PAI no longer mints tx_header, tx_entry or account. The test
+        // master stands them up first, then runs the production master unchanged.
+        "spring.liquibase.change-log=classpath:db/changelog/db.changelog-test-master.xml",
+        "spring.batch.job.enabled=false",
         "dcre.exchange-root=build/test-exchange"})
 class PaiJobTest {
 
@@ -52,7 +56,9 @@ class PaiJobTest {
     @Test
     void initsCreditorAccountsIdempotently() throws Exception {
         UUID arrival = UUID.randomUUID();
-        // account + tx_header + tx_entry exist via PAI's bootstrap guards.
+        // account + tx_header + tx_entry exist via the TEST fixture
+        // (src/test/resources/db/changelog/test/001-read-sources.xml), standing in for
+        // their owners. PAI no longer mints them; see db.changelog-master.xml.
         String[] known = {"62000000000000001", "62000000000000002", "62000000000000003"};
         for (String acc : known) {
             jdbc.update("INSERT INTO account (product_code, account_number, app_no, acc_type,"

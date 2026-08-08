@@ -9,7 +9,9 @@ import org.testcontainers.utility.DockerImageName;
 
 /** Same bootstrap as PaiJobTest: batch launch disabled, static CRDB. */
 @CucumberContextConfiguration
-@SpringBootTest(properties = {"spring.batch.job.enabled=false"})
+@SpringBootTest(properties = {
+        "spring.liquibase.change-log=classpath:db/changelog/db.changelog-test-master.xml",
+        "spring.batch.job.enabled=false"})
 public class CucumberSpringConfig {
 
     static final CockroachContainer CRDB =

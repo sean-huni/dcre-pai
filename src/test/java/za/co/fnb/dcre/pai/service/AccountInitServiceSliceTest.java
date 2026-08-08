@@ -39,7 +39,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * no-ops (row identity preserved, no CREATED->EXISTS flip, no dup accounts).
  * init() runs inside an outer REQUIRED tx exactly like the Batch step tx.
  */
-@SpringBootTest(properties = {"spring.batch.job.enabled=false"})
+@SpringBootTest(properties = {
+        "spring.liquibase.change-log=classpath:db/changelog/db.changelog-test-master.xml",
+        "spring.batch.job.enabled=false"})
 class AccountInitServiceSliceTest {
 
     static final CockroachContainer CRDB =

@@ -5,21 +5,60 @@
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
 
-    <!-- PAI single writer (R-04). Per-transaction account-init verdict,
-         immutable once written (a rerun must not flip CREATED to EXISTS). -->
+    <!-- PAI single writer (R-04). Per-transaction account-init verdict, immutable once
+         written (a rerun must not flip CREATED to EXISTS). The unique key IS the full
+         business identity, (arrival_id, sequence), so a restarted slice no-ops on its
+         own committed rows via INSERT ... ON CONFLICT DO NOTHING rather than
+         duplicating them.
+
+         THIS IS THE RELATION prw READS. prw's DueSql.DUE_GATES counts rows in
+         pai_verdict against dcre_pay, and this changeset is the only thing in the
+         estate that creates it. That is why PAI's datasource default pointing at
+         dcre_col was fatal rather than untidy: the creator built the table in the
+         collections database while the reader looked for it in the payments one.
+
+         SCRUM-107 converted this from a raw-SQL body to typed tags. Not cosmetic: a
+         changelog extractor cannot see a relation minted inside a raw-SQL body, so an
+         audit of "which service creates pai_verdict" answered NOBODY, which is
+         precisely the reader-with-no-creator shape this project spent the day removing
+         from ais_verdict. Typed tags make the creator visible to the same tooling that
+         found the defect. The changeset keeps its id, so a database that has already
+         run it would report a checksum change; none can, because the only database
+         that ever ran it is dcre_col, which PAI no longer connects to, and dcre_pay
+         has no pai_databasechangelog at all.
+
+         UNGUARDED, deliberately, matching the v1 baselines elsewhere in the estate: an
+         onFail="MARK_RAN" tableExists guard on a table only PAI creates could never
+         fire, and a guard that cannot fire is not free. It would silently SKIP the
+         create on the day the assumption stopped holding, turning a loud startup
+         failure into a table that is quietly missing. -->
     <changeSet id="001-pai-verdict-pai" author="dcre">
-        <sql>
-            CREATE TABLE IF NOT EXISTS pai_verdict (
-                id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-                arrival_id UUID NOT NULL,
-                sequence INT NOT NULL,
-                action VARCHAR(16) NOT NULL,
-                version BIGINT NOT NULL DEFAULT 0,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                UNIQUE (arrival_id, sequence)
-            ) -- action is EXISTS or CREATED
-        </sql>
+        <createTable tableName="pai_verdict">
+            <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="arrival_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="sequence" type="INT">
+                <constraints nullable="false"/>
+            </column>
+            <!-- EXISTS or CREATED -->
+            <column name="action" type="VARCHAR(16)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="version" type="BIGINT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addUniqueConstraint tableName="pai_verdict" columnNames="arrival_id, sequence"
+                             constraintName="uq_pai_verdict_arrival_sequence"/>
     </changeSet>
 
 </databaseChangeLog>
