@@ -22,7 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-@SpringBootTest(properties = {"spring.batch.job.enabled=false",
+@SpringBootTest(properties = {
+        // SCRUM-107: PAI no longer mints tx_header, tx_entry or account. The test
+        // master stands them up first, then runs the production master unchanged.
+        "spring.liquibase.change-log=classpath:db/changelog/db.changelog-test-master.xml",
+        "spring.batch.job.enabled=false",
         "dcre.exchange-root=build/test-exchange"})
 class PaiJobTest {
 
@@ -52,7 +56,9 @@ class PaiJobTest {
     @Test
     void initsCreditorAccountsIdempotently() throws Exception {
         UUID arrival = UUID.randomUUID();
-        // account + tx_header + tx_entry exist via PAI's bootstrap guards.
+        // account + tx_header + tx_entry exist via the TEST fixture
+        // (src/test/resources/db/changelog/test/001-read-sources.xml), standing in for
+        // their owners. PAI no longer mints them; see db.changelog-master.xml.
         String[] known = {"62000000000000001", "62000000000000002", "62000000000000003"};
         for (String acc : known) {
             jdbc.update("INSERT INTO account (product_code, account_number, app_no, acc_type,"
@@ -79,8 +85,13 @@ class PaiJobTest {
                 + " AND action='EXISTS'", Integer.class, arrival));
         assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM pai_verdict WHERE arrival_id=?"
                 + " AND action='CREATED'", Integer.class, arrival));
-        assertEquals(accountsBefore + 2, jdbc.queryForObject(
-                "SELECT count(*) FROM account", Integer.class), "exactly the 2 unknown creditors minted (R-11)");
+        // SCRUM-107: the account master is READ, never written. The two absent creditors
+        // are recorded in PAI's own relation instead.
+        assertEquals(accountsBefore, jdbc.queryForObject(
+                "SELECT count(*) FROM account", Integer.class), "PAI writes no row into the account master");
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM unknown_creditor WHERE arrival_id=?",
+                        Integer.class, arrival),
+                "exactly the 2 absent creditors recorded, in the relation PAI owns");
 
         JobExecution rerun = jobOperator.start(paiJob, new JobParametersBuilder()
                 .addString("arrival.id", arrival.toString(), true)
@@ -90,8 +101,11 @@ class PaiJobTest {
                 + " AND action='EXISTS'", Integer.class, arrival), "verdicts immutable: no CREATED->EXISTS flip");
         assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM pai_verdict WHERE arrival_id=?"
                 + " AND action='CREATED'", Integer.class, arrival), "verdicts immutable: rerun keeps CREATED");
-        assertEquals(accountsBefore + 2, jdbc.queryForObject(
-                "SELECT count(*) FROM account", Integer.class), "rerun mints no duplicate accounts (R-05)");
+        assertEquals(accountsBefore, jdbc.queryForObject(
+                "SELECT count(*) FROM account", Integer.class), "a rerun writes no row into the master either");
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM unknown_creditor WHERE arrival_id=?",
+                        Integer.class, arrival),
+                "rerun records no duplicate sighting: insert-once on the account number (R-05)");
     }
 
     @Test

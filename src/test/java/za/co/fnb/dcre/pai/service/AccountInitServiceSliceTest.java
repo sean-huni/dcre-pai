@@ -16,6 +16,7 @@ import org.testcontainers.utility.DockerImageName;
 import za.co.fnb.dcre.pai.data.repo.AccountRepo;
 import za.co.fnb.dcre.pai.data.repo.PaiVerdictRepo;
 import za.co.fnb.dcre.pai.data.repo.TxEntryRepo;
+import za.co.fnb.dcre.pai.data.repo.UnknownCreditorRepo;
 import za.co.fnb.dcre.pai.service.AccountInitService.InitCounts;
 
 import java.lang.reflect.InvocationTargetException;
@@ -36,10 +37,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * (1) a slice that exhausts its retry budget fails the run WITHOUT rolling
  * back slices already committed; (2) a transient 40001 abort on a slice is
  * retried in a fresh tx and succeeds; (3) a re-run over committed slices
- * no-ops (row identity preserved, no CREATED->EXISTS flip, no dup accounts).
- * init() runs inside an outer REQUIRED tx exactly like the Batch step tx.
+ * no-ops (row identity preserved, no CREATED->EXISTS flip, one sighting per
+ * creditor). init() runs inside an outer REQUIRED tx exactly like the Batch step tx.
  */
-@SpringBootTest(properties = {"spring.batch.job.enabled=false"})
+@SpringBootTest(properties = {
+        "spring.liquibase.change-log=classpath:db/changelog/db.changelog-test-master.xml",
+        "spring.batch.job.enabled=false"})
 class AccountInitServiceSliceTest {
 
     static final CockroachContainer CRDB =
@@ -63,6 +66,9 @@ class AccountInitServiceSliceTest {
 
     @Autowired
     AccountRepo accounts;
+
+    @Autowired
+    UnknownCreditorRepo unknownCreditors;
 
     @Autowired
     PaiVerdictRepo verdicts;
@@ -123,21 +129,28 @@ class AccountInitServiceSliceTest {
 
         InitCounts rerun = stepTx.execute(status -> service(verdicts).init(arrival));
 
-        assertEquals(new InitCounts(4, 2), rerun,
-                "restart sees slices 1-2 as existing accounts and resumes the failed slice");
+        // SCRUM-107: the tally is now a function of the MASTER's contents, not of how
+        // many times PAI has run. Before, a first run reported CREATED and the next
+        // reported EXISTS for the same account, because the first run had put it there.
+        assertEquals(new InitCounts(0, 6), rerun,
+                "none of the six is in the account master, on the first run or the restart");
         assertEquals(6, verdictCount(), "one verdict per spine transaction, nothing else");
         assertEquals(6, verdictCount("CREATED"), "verdicts immutable: no CREATED->EXISTS flip on re-run");
         List<UUID> after = jdbc.queryForList(
                 "SELECT id FROM pai_verdict WHERE arrival_id=? ORDER BY sequence", UUID.class, arrival);
         assertTrue(after.containsAll(committedIds), "committed rows keep their identity (no delete+reinsert)");
         for (int seq = 1; seq <= 6; seq++) {
-            assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM account WHERE account_number=?",
-                    Integer.class, prefix + seq), "exactly one account row per creditor (R-05/R-11)");
+            assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM account WHERE account_number=?",
+                    Integer.class, prefix + seq), "PAI writes nothing into the account master");
+            assertEquals(1, jdbc.queryForObject(
+                    "SELECT count(*) FROM unknown_creditor WHERE account_number=?",
+                    Integer.class, prefix + seq),
+                    "exactly one sighting per creditor across both runs (R-05, insert-once)");
         }
     }
 
     private AccountInitService service(final PaiVerdictRepo verdictRepo) {
-        return new AccountInitService(entries, accounts, verdictRepo, txManager, SLICE_SIZE);
+        return new AccountInitService(entries, accounts, unknownCreditors, verdictRepo, txManager, SLICE_SIZE);
     }
 
     /** Delegates to the real repo; throws a CRDB-shaped 40001 for matching sequences, {@code failures} times. */

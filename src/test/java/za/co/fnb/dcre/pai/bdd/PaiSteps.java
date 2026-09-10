@@ -1,14 +1,13 @@
 package za.co.fnb.dcre.pai.bdd;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.cucumber.java.Before;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
-import java.math.BigDecimal;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.batch.core.BatchStatus;
@@ -101,38 +100,61 @@ public class PaiSteps {
                 "one verdict per spine transaction, nothing else");
     }
 
-    @Then("no new accounts were minted")
-    public void noNewAccountsMinted() {
+    /**
+     * The ownership assertion, on EVERY scenario. PAI reads the account master and
+     * writes nothing to it, so the row count it saw before the run is the row count
+     * afterwards, whether the run found everything, nothing, or a mixture.
+     */
+    @Then("the account master is unchanged")
+    public void theAccountMasterIsUnchanged() {
         assertEquals(accountsBeforeRun, (long) jdbc.queryForObject(
-                "SELECT count(*) FROM account", Long.class), "all-exist run mints nothing (A-7)");
+                "SELECT count(*) FROM account", Long.class),
+                "PAI does not own the account master and writes no row into it (SCRUM-107)");
     }
 
-    @Then("exactly one account row exists for each of {string}")
-    public void exactlyOneAccountRowEach(String labels) {
+    @Then("no creditor was recorded as unknown")
+    public void noCreditorRecordedAsUnknown() {
+        assertEquals(0, (int) jdbc.queryForObject(
+                "SELECT count(*) FROM unknown_creditor WHERE arrival_id=?", Integer.class, arrival),
+                "an all-exist run records no sighting (A-7)");
+    }
+
+    @Then("exactly one unknown-creditor record exists for each of {string}")
+    public void exactlyOneUnknownCreditorRecordEach(String labels) {
         for (String label : labels.split(",\\s*")) {
             assertEquals(1, (int) jdbc.queryForObject(
+                    "SELECT count(*) FROM unknown_creditor WHERE account_number=?",
+                    Integer.class, account(label)),
+                    "exactly one sighting for " + label + ", insert-once on the number (R-05/R-11)");
+            // Control for the assertion above and for "the account master is unchanged":
+            // the label really is absent from the master, so the sighting is the right
+            // branch having run rather than a coincidence of counting.
+            assertEquals(0, (int) jdbc.queryForObject(
                     "SELECT count(*) FROM account WHERE account_number=?", Integer.class, account(label)),
-                    "exactly one account row for " + label + " (R-05/R-11)");
+                    "control: " + label + " is genuinely absent from the master");
         }
     }
 
-    @Then("the minted account {string} carries the synthetic ENDO defaults")
-    public void mintedAccountCarriesDefaults(String label) {
+    @Then("the unknown-creditor record for {string} names this arrival")
+    public void theUnknownCreditorRecordNamesThisArrival(String label) {
         Map<String, Object> row = jdbc.queryForMap(
-                "SELECT product_code, acc_type, balance, process_status, status, branch_code,"
-                        + " ucn, client_id, app_no, max_credit_limit FROM account WHERE account_number=?",
+                "SELECT account_number, arrival_id FROM unknown_creditor WHERE account_number=?",
                 account(label));
-        assertEquals("FNBRF", row.get("product_code"), "product_code");
-        assertEquals("CACC", row.get("acc_type"), "acc_type");
-        assertEquals(0, new BigDecimal("999999999.99").compareTo(new BigDecimal(String.valueOf(row.get("balance")))),
-                () -> "balance (generous so cap checks pass post-init), actual=" + row.get("balance"));
-        assertEquals("ACTIVE", row.get("process_status"), "process_status");
-        assertEquals("AAUT", row.get("status"), "status");
-        assertEquals("250205", row.get("branch_code"), "branch_code");
-        assertEquals("100000000000", String.valueOf(row.get("ucn")), "ucn");
-        assertEquals(2L, ((Number) row.get("client_id")).longValue(), "client_id");
-        assertEquals(account(label), row.get("app_no"), "app_no mirrors account_number");
-        assertNull(row.get("max_credit_limit"), "max_credit_limit stays NULL (FNBRF caps via balance)");
+        assertEquals(account(label), row.get("account_number"), "account_number");
+        assertEquals(arrival, row.get("arrival_id"), "the arrival that first observed the absence");
+        // The row carries the sighting and NOTHING invented: no product, no balance, no
+        // branch. The hardcoded toolkit-sample values PAI used to mint were what let a
+        // downstream stage disarm PTV's cap tier one account at a time.
+        assertEquals(List.of(), jdbc.queryForList(
+                "SELECT column_name FROM information_schema.columns WHERE table_name='unknown_creditor'"
+                        + " AND column_name IN ('balance','product_code','max_credit_limit','status')",
+                String.class),
+                "the sighting relation carries no invented account attributes");
+        // Control: the same query DOES see this table's real columns.
+        assertEquals(List.of("account_number"), jdbc.queryForList(
+                "SELECT column_name FROM information_schema.columns WHERE table_name='unknown_creditor'"
+                        + " AND column_name = 'account_number'", String.class),
+                "control: the schema read reaches unknown_creditor");
     }
 
     private String account(String label) {

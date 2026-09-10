@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- ============================================================================
+         TEST FIXTURE ONLY. Nothing in this file ships: it lives under src/test and is
+         reached only through db.changelog-test-master.xml.
+
+         SCRUM-107. PAI READS three relations it does not own and, from this change on,
+         does not create. Its own integration tests still need them to exist. In
+         production the owning services create them; here this fixture stands in for
+         those services, and it must run BEFORE the production master for that reason.
+
+         Owners:
+           tx_header, tx_entry .......................... PRR   (R-04 single writer)
+           account ...................................... nobody yet; the acs service
+                                                          is being built to own it, in
+                                                          its own dcre_acs database
+
+         account is the one to watch. PAI used to mint it into its own datasource, so a
+         clean clone created the table and then wrote rows into it. Both halves are now
+         gone: the create left the shipped changelog earlier in SCRUM-107, and the WRITE
+         left AccountRepo with it, because a context that cannot control writes to a
+         relation does not own it. What remains is a READ, the probe that asks whether a
+         creditor is known, so this fixture must keep creating the table or every PAI
+         test fails on an absent relation. Where that probe should point is the open
+         account-model decision: a deliberate, recorded gap, not an oversight. See the
+         ordering contract in README.md and in db.changelog-master.xml.
+
+         THIS IS A HAND-MAINTAINED MIRROR OF ANOTHER REPOSITORY'S DDL, which is a drift
+         class: PAI's suite can stay green against a shape the owner has already
+         changed, and nothing here would notice. The bodies below were taken from the
+         changesets PAI itself used to ship (which in turn carried the owners' exact
+         column sets), not retyped from memory. Treat any owner schema change as
+         requiring a matching edit here. The durable fix is a shared test-fixture
+         artifact published by the owners.
+         ============================================================================ -->
+
+    <changeSet id="pai-testfixture-tx-header" author="dcre">
+        <createTable tableName="tx_header">
+            <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="arrival_id" type="UUID">
+                <constraints nullable="false" unique="true" uniqueConstraintName="uq_header_arrival"/>
+            </column>
+            <column name="msg_id_raw" type="VARCHAR(35)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="msg_id" type="VARCHAR(35)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_ts" type="VARCHAR(14)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="tx_count" type="INT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="initg_pty" type="VARCHAR(35)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="business_date" type="VARCHAR(8)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="client_token" type="VARCHAR(16)"/>
+            <column name="layout_version" type="INT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="version" type="BIGINT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <changeSet id="pai-testfixture-tx-entry" author="dcre">
+        <createTable tableName="tx_entry">
+            <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="arrival_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="sequence" type="INT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="record_type" type="VARCHAR(2)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="e2e_raw" type="VARCHAR(35)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="e2e" type="VARCHAR(35)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="creditor_account" type="VARCHAR(23)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="contract_ref" type="VARCHAR(14)"/>
+            <column name="currency" type="VARCHAR(3)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="amount_raw" type="VARCHAR(15)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="amount" type="DECIMAL(18,2)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="branch_code" type="VARCHAR(11)"/>
+            <column name="debtor_name" type="VARCHAR(35)"/>
+            <column name="debtor_account" type="VARCHAR(23)"/>
+            <column name="acc_type_seq" type="VARCHAR(8)"/>
+            <column name="version" type="BIGINT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addUniqueConstraint tableName="tx_entry" columnNames="arrival_id, sequence"
+                             constraintName="uq_entry_arrival_sequence"/>
+    </changeSet>
+
+    <changeSet id="pai-testfixture-account" author="dcre">
+        <createTable tableName="account">
+            <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="product_code" type="VARCHAR(8)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="account_number" type="VARCHAR(34)">
+                <constraints nullable="false" unique="true"
+                             uniqueConstraintName="uq_account_account_number"/>
+            </column>
+            <column name="app_no" type="VARCHAR(34)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="acc_type" type="VARCHAR(4)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="branch_code" type="VARCHAR(11)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="balance" type="DECIMAL(18,2)"/>
+            <column name="max_credit_limit" type="DECIMAL(18,2)"/>
+            <column name="cancel_reason" type="VARCHAR(64)"/>
+            <column name="country_id" type="INT8" defaultValueNumeric="1">
+                <constraints nullable="false"/>
+            </column>
+            <column name="edr_ind" type="BOOL" defaultValueBoolean="false">
+                <constraints nullable="false"/>
+            </column>
+            <column name="pre_ind" type="BOOL" defaultValueBoolean="false">
+                <constraints nullable="false"/>
+            </column>
+            <column name="process_status" type="VARCHAR(16)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="status" type="VARCHAR(8)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="status_reason" type="VARCHAR(64)"/>
+            <column name="ucn" type="VARCHAR(20)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="client_id" type="INT8">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="TIMESTAMPTZ" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <!-- LIQUIBASE-SQL-EXCEPTION: Liquibase Community ships no typed tag for a CHECK
+         constraint (addCheckConstraint is a Pro change type), so the three CHECKs of
+         the toolkit's account DDL (fnb_dcre_ctv_toolkit/samples/dcre_accounts_sample.sql)
+         cannot be expressed in typed XML. Confined to a test fixture that never ships.
+
+         They are worth carrying rather than dropping even though PAI no longer mints
+         anything here: the tests seed known accounts through this table, and a fixture
+         with weaker constraints than the real relation accepts rows the real one
+         rejects, which is a fixture that cannot fail for a reason the code can. The
+         constraint that used to matter most, chk_account_product_amount, is the one
+         PAI's own mint would have violated, and the mint is what SCRUM-107 removed. -->
+    <changeSet id="pai-testfixture-account-checks" author="dcre">
+        <sql>
+            ALTER TABLE account ADD CONSTRAINT chk_account_product
+                CHECK (product_code IN ('FNBRF', 'FNBCC'));
+            ALTER TABLE account ADD CONSTRAINT chk_account_product_amount CHECK (
+                (product_code = 'FNBRF' AND balance IS NOT NULL AND max_credit_limit IS NULL)
+                OR
+                (product_code = 'FNBCC' AND max_credit_limit IS NOT NULL AND balance IS NULL)
+            );
+            ALTER TABLE account ADD CONSTRAINT chk_account_amounts_nonneg CHECK (
+                (balance IS NULL OR balance >= 0)
+                AND (max_credit_limit IS NULL OR max_credit_limit >= 0)
+            );
+        </sql>
+    </changeSet>
+
+</databaseChangeLog>

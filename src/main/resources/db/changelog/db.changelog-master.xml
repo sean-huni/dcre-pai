@@ -5,8 +5,51 @@
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
 
-    <include file="db/changelog/2026/07/000-bootstrap.xml"/>
+    <!-- ============================================================================
+         SCRUM-107: PAI NO LONGER MINTS ITS READ SOURCES, AND THAT IS AN ORDERING
+         CONTRACT.
+
+         000-bootstrap.xml is deleted. It bootstrap-created three relations PAI does
+         not own, in unguarded raw-SQL blocks, so that PAI could run on a fresh
+         database before their owners ever had:
+
+           tx_header, tx_entry ...... PRR owns them (R-04 single writer)
+           account .................. nobody in this family owns it; the acs service
+                                      is being built to own it, in dcre_acs
+
+         A reader minting the writer's schema is the shared-table coupling the family
+         split exists to remove, and it is not merely untidy. PRR's baseline creates
+         tx_header and tx_entry UNGUARDED, so a PAI mint that won the race would make
+         PRR crashloop on "relation already exists". The mint was also a hand-copied
+         mirror that nothing compared against the owner, which is a drift class: PAI's
+         suite would stay green against a column set PRR had already changed. This is
+         the same retirement collections/crg performed, copied rather than reinvented.
+
+         THE CONTRACT: PAI's migration must run AFTER PRR's. On a fresh dcre_pay, PAI
+         migrating first now fails loudly and immediately, naming the missing relation
+         instead of inventing a wrong one. That is the correct failure.
+
+         THE WRITE SIDE IS NOW CLOSED. PAI issued INSERT INTO account against its
+         primary datasource, which is a write-ownership violation whichever database
+         that datasource points at, and no published view can fix it: a context that
+         cannot control writes to a relation does not own it. Those writes were
+         synthetic sentinels with hardcoded toolkit-sample values, not reference data,
+         so they moved to a PAI-owned relation named for what they mean,
+         unknown_creditor (003-unknown-creditor.xml). Nothing here presupposes where
+         the account master ends up.
+
+         THE OPEN EDGE that remains, recorded rather than left to be discovered:
+         nothing creates account in dcre_pay, and PAI still READS it to decide whether
+         a creditor is known. So PAI cannot complete a run against a real dcre_pay
+         until the account master has a home and this READ is repointed at it. That is
+         deliberately NOT worked around with a mint, because a mint is what put PAI's
+         schema in the wrong database in the first place, and it now fails loudly and
+         immediately, naming the missing relation. Integration tests stand the read
+         sources up from src/test/resources/db/changelog/test/001-read-sources.xml.
+         ============================================================================ -->
+
     <include file="db/changelog/2026/07/001-pai.xml"/>
     <include file="db/changelog/2026/07/002-batch-metadata.xml"/>
+    <include file="db/changelog/2026/08/003-unknown-creditor.xml"/>
 
 </databaseChangeLog>
