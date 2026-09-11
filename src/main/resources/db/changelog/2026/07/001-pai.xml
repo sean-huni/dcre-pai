@@ -33,6 +33,10 @@
          create on the day the assumption stopped holding, turning a loud startup
          failure into a table that is quietly missing. -->
     <changeSet id="001-pai-verdict-pai" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="pai_verdict"/></not>
+        </preConditions>
+        
         <createTable tableName="pai_verdict">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
                 <constraints primaryKey="true" nullable="false"/>

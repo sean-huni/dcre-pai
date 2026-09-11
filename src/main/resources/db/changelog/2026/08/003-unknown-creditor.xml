@@ -41,6 +41,10 @@
          ============================================================================ -->
 
     <changeSet id="003-unknown-creditor-pai" author="dcre">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="unknown_creditor"/></not>
+        </preConditions>
+        
         <createTable tableName="unknown_creditor">
             <column name="id" type="UUID" defaultValueComputed="gen_random_uuid()">
                 <constraints primaryKey="true" nullable="false"/>
