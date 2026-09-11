@@ -5,6 +5,13 @@
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
 
+    <!-- RE-RUN GUARD (2026-09-11): the changeset below carries an onFail="MARK_RAN"
+         precondition naming ALL NINE objects this sqlFile creates, under a single not/and,
+         so it is marked run only when the whole set is already present. A half-applied file
+         therefore still re-runs and the IF NOT EXISTS clause on every CREATE makes that safe.
+         Guarding on ONE object would reinstate A-81: it reads a half-applied file as complete
+         and skips the rest forever. -->
+
     <changeSet id="002-batch-metadata-pai" author="dcre">
         <!-- A-81: the sqlFile gained IF NOT EXISTS on every CREATE, which CHANGES this
              changeset's checksum and would fail validation on every database that had
@@ -15,6 +22,26 @@
              cannot damage a database in any state. Applying it is what must stay possible;
              the byte-for-byte checksum is not the control that matters for this file. -->
         <validCheckSum>ANY</validCheckSum>
+        <!-- RE-RUN GUARD: marked run only when ALL NINE objects this sqlFile creates are
+             already present. A half-applied file therefore still re-runs, and the
+             IF NOT EXISTS clause on every CREATE makes that re-run safe. Guarding on a
+             single object would reinstate A-81: it reads a half-applied file as complete
+             and skips the rest forever. -->
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <and>
+                    <tableExists tableName="PAI_BATCH_JOB_INSTANCE"/>
+                    <tableExists tableName="PAI_BATCH_JOB_EXECUTION"/>
+                    <tableExists tableName="PAI_BATCH_JOB_EXECUTION_PARAMS"/>
+                    <tableExists tableName="PAI_BATCH_STEP_EXECUTION"/>
+                    <tableExists tableName="PAI_BATCH_STEP_EXECUTION_CONTEXT"/>
+                    <tableExists tableName="PAI_BATCH_JOB_EXECUTION_CONTEXT"/>
+                    <sequenceExists sequenceName="PAI_BATCH_STEP_EXECUTION_SEQ"/>
+                    <sequenceExists sequenceName="PAI_BATCH_JOB_EXECUTION_SEQ"/>
+                    <sequenceExists sequenceName="PAI_BATCH_JOB_INSTANCE_SEQ"/>
+                </and>
+            </not>
+        </preConditions>
         <sqlFile path="db/changelog/2026/07/batch-metadata-pai.sql" splitStatements="true"/>
     </changeSet>
 
