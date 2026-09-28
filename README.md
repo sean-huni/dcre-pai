@@ -104,6 +104,7 @@ migrated fails on the first query, naming the missing relation, and is relaunche
 - Docker, for the Testcontainers suite and image builds
 - Platform libs in Maven Local (no remote repository): `za.co.fnb.dcre:platform-batch:0.1.0` and
   `za.co.fnb.dcre:platform-persistence:0.1.0`
+- The `dcre_pay` database must be created by hand (`CREATE DATABASE IF NOT EXISTS dcre_pay;`): dcre-infra's `scripts/crdb-init.sql` creates only `dcre_col`, `agt_ops` and `dcre_man` (checked 2026-09-28).
 
 ## Quickstart
 
