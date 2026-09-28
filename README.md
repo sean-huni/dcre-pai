@@ -1,81 +1,109 @@
 # dcre-pai
 
-Account Init Service (ENDO): the account-init verdict applier and the fleet's single writer of the `account` table (R-04).
+> Part of the DCRE fleet. For the fleet map, the rulings and the diagrams that specify every stage, start at the [DCRE design register](https://github.com/sean-huni/dcre-design-register); the complete list of live repositories is its [Repositories](https://github.com/sean-huni/dcre-design-register#repositories) table.
 
-## Rename status (SCRUM-107): cut over
-
-This repository is `dcre-ais` cloned and renamed to the name the payments REQ sheet has always
-given this box, `PAI`, captioned "Account Init Service (ENDO)". The diagrams are the specification
-(`design-register/CLAUDE.md`), and `ais` was this service under the wrong name.
-
-The fleet side of the rename has since landed. Verified against the AGT sources on 2026-08-08:
-
-| Fact | State |
-|---|---|
-| `RouteDags.ENDO` | `PRR -> PTV -> PAI -> fork {PRW, PIR}`, every stage a payments one |
-| `Stage.PAI` / `AGT_PAI_IMAGE` | both exist; the pre-cutover `Stage.AIS` and `AGT_AIS_IMAGE` are gone |
-| The pay-arm eligibility gate | `prw`'s `DueSql` counts rows in `pai_verdict`; `crw` is collections-only |
-
-`pai_verdict` is this service's own table and `prw` is its consumer. The `ais_verdict` name survives
-only in `prw`'s guard tests, which assert that the old name is NOT read (reading it would silently
-count nothing), and in `crw`'s note that no changelog in the estate ever created it.
-
-**The database is `dcre_pay`, the payments family's own.** It said `dcre_col` here until SCRUM-107,
-because this repo is `dcre-ais` cloned and the collections datasource came across unchanged. That was
-not a stale string: `AccountRepo` issues `INSERT INTO account`, so a clean clone built the entire PAI
-schema and its `pai_databasechangelog` inside the COLLECTIONS database and wrote account rows there,
-with no error at all. The write is perfectly valid against the wrong database, which is precisely why
-nothing caught it.
+Account Init Service (ENDO): the payments stage that checks every transaction's creditor account
+against the account master, records one immutable verdict per transaction in `pai_verdict`, and
+records creditors it could not find in its own `unknown_creditor` table.
 
 ## What it does
 
-PAI is the post-validator account-init stage of the ENDO Payments request DAG. The payments REQ sheet draws it as `PRR -> PTV -> PAI -> || -> { PRW, PIR }`; the fleet today still runs the borrowed collections lane `CRR -> CTV -> AIS -> CIR` (SCRUM-69: CDE never runs on the pay flow, CRW picks pay-flow work up from ingest day via `tx_header.flow`), and the DC Collections route omits this stage entirely. For every spine transaction of an arrival it ensures the creditor account exists: known account -> verdict `EXISTS`; absent -> idempotent mint (R-11) with synthetic ENDO defaults (R-35) -> verdict `CREATED`, recorded immutably in `pai_verdict` keyed `(arrival_id, sequence)`. A missing account is never a rejection, it is a creation; an all-exist run is a valid no-op (A-7). PAI is DB-only for business file I/O (R-30), but on `COMPLETED` it writes the `BUSINESS_ACCEPTED` outcome seam file so the AGT reconciler can observe the stage (without it the run is reaped as `TECH_FAILED`).
+| | |
+| --- | --- |
+| Stage code | `PAI` (AGT `Stage.PAI`), captioned "Account Init Service (ENDO)" |
+| Family / leg | payments (ENDO), REQ |
+| Trigger | arrival-launched: a DAG successor, one Kubernetes Job per arrival |
+| Upstream | `PTV` |
+| Downstream | the terminal fork `{PRW, PIR}` |
+| Diagram sheet | `dcre-payments-req` in the design register |
+
+AGT's `RouteDags.ENDO` (checked 2026-09-28) is `PRR -> PTV -> PAI -> fork {PRW, PIR}`, with no CDE
+analogue and `Emission.NONE`: payments transactions are processed immediately. The DC collections
+route has no PAI.
+
+For every spine transaction of the arrival (`tx_entry`, read in keyset slices by `sequence`):
+
+- creditor account present in `account` -> verdict `EXISTS`;
+- absent -> the sighting is recorded in `unknown_creditor` (insert-once on `account_number`, first
+  sighting wins) -> verdict `CREATED`.
+
+Verdicts are immutable and an all-exist run is a valid no-op (A-7). **PAI does not write `account`.**
+Until SCRUM-107 the absent branch minted an `account` row with hardcoded toolkit-sample values
+(including a `999999999.99` balance "so caps pass"); with PTV's account tier now failing closed that
+turned one rejection into a permanent pass, so the write moved to `unknown_creditor`. The verdict
+value `CREATED` was kept because PRW and PRG read it as a cross-service contract.
+
+PAI does no business file I/O (R-30). On COMPLETED it writes the `BUSINESS_ACCEPTED` outcome seam
+file so the AGT reconciler can observe the stage.
+
+### Lineage
+
+This repository is `dcre-ais` cloned and renamed to the name the payments REQ sheet gives this box.
+AGT carries `Stage.PAI` and `AGT_PAI_IMAGE`; the pre-cutover `Stage.AIS` / `AGT_AIS_IMAGE` are gone
+(checked 2026-09-28). Its datasource default said `dcre_col` until SCRUM-107, so a clean clone
+built the PAI schema inside the collections database without any error.
 
 ## Architecture and principles
 
-Spring Boot 4.1.0 / Spring Batch 6 / Java 25, run as a short-lived one-shot process (an ephemeral K8s Job minted by AGT), never a long-running server. `main` delegates to platform-batch's `ExitCodeMain`, so the JVM exit code carries the Batch outcome.
+Spring Boot 4.1.0 / Spring Batch 6 / Java 25, run as a one-shot process (an ephemeral K8s Job minted
+by AGT). `main` delegates to platform-batch's `ExitCodeMain`, so the JVM exit code carries the Batch
+outcome (R-34).
 
-- **SOLID, 3-tier, layer-first packages**: the tasklet is a thin entry adapter (`AccountInitTasklet` extracts `arrival.id` and delegates), business logic lives in `service/AccountInitService`, persistence only via `data/repo` (`TxEntryRepo` read-only over CRR's spine, `AccountRepo`, `PaiVerdictRepo`). `CrdbRetry` is a single-purpose bounded-backoff unit for CockroachDB 40001 serialization aborts. One job `paiJob`, one tasklet step `accountInitStep`.
-- **12FactorApp Alignment - https://12factor.net/**: config strictly from the environment with committed working dev defaults (a clean clone runs with no `.env`), stateless process, backing services (CockroachDB, exchange directory) as attached resources, dev/prod parity (the tests run the real job against a real CockroachDB container).
-- **Idempotent restart semantics**: every write is create-if-absent on the full business identity. Accounts: `INSERT ... ON CONFLICT (account_number) DO NOTHING`. Verdicts: `INSERT ... ON CONFLICT (arrival_id, sequence) DO NOTHING`, never `DO UPDATE` (immutable: a rerun cannot flip `CREATED` to `EXISTS`) and never CRDB `UPSERT INTO` (UPSERT arbitrates on the PK only; the business identity is `(arrival_id, sequence)`). Verdicts commit in bounded sequence slices (`REQUIRES_NEW` per slice, keyset-paged reads inside the slice transaction), so a restart no-ops over committed slices and resumes the rest; one giant serializable transaction at 300k transactions is unrefreshable on CRDB (`RETRY_SERIALIZABLE`). 40001 aborts retry in a fresh transaction at both slice level (`CrdbRetry`, 5 attempts, exponential backoff with jitter) and step level (`CrdbRetryExceptionHandler`). The JobRepository dedupes relaunches on the identifying `arrival.id` parameter, and `StaleExecutionSweeper.abandonStale(ds, "PAI_BATCH_", 60)` runs before launch so a killed pod's stranded `STARTED` execution never blocks the relaunch.
+- **SOLID, 3-tier, layer-first packages**: `AccountInitTasklet` extracts `arrival.id` and delegates;
+  business logic in `service/AccountInitService`; persistence only via `data/repo` (`TxEntryRepo`
+  and `AccountRepo` read-only, `PaiVerdictRepo` and `UnknownCreditorRepo` the only writers).
+  One job `paiJob`, one tasklet step `accountInitStep`.
+- **12FactorApp Alignment - https://12factor.net/**: config strictly from the environment with
+  committed working dev defaults (a clean clone runs with no `.env`), stateless process, CockroachDB
+  and the exchange directory as attached resources.
 
-Persistence notes: `AccountRepo` extends `Repository`, not `CrudRepository` (the derived `save()` path cannot satisfy the shared table's NOT NULL contract from the minimal `AccountEntity`; only targeted exists/create queries are exposed). Minted accounts carry SYNTHETIC-CONTRACT dev defaults per the toolkit fixture DDL (R-35): `product_code FNBRF`, `acc_type CACC`, `balance 999999999.99`, `process_status ACTIVE`, `status AAUT`, `branch_code 250205`, `ucn 100000000000`, `client_id 2`, `app_no` mirrors the account number.
+### Database
 
-Liquibase XML changelog master, per-service history tables `pai_databasechangelog` / `pai_databasechangeloglock` in `dcre_pay`:
+- **Database today:** `dcre_pay`, via `DCRE_DB_URL` / `DCRE_DB_USER` / `DCRE_DB_PASSWORD`. A second
+  datasource, `DCRE_AGTOPS_DB_URL` / `_USER` / `_PASSWORD`, targets `agt_ops` for the
+  `HeartbeatWriter` liveness stamp on `agt_ops.launch_intent`.
+- **Writes:** `pai_verdict`, `unknown_creditor`, `PAI_BATCH_*` metadata, Liquibase history
+  `pai_databasechangelog` / `pai_databasechangeloglock`.
+- **Reads:** `tx_entry` (created by PRR) and `account` (created in `dcre_pay` by PTV's
+  `003-account-reference.xml` and filled by PTV's reference loader, checked 2026-09-28).
 
-1. `001-pai.xml`: `pai_verdict`, `UNIQUE (arrival_id, sequence)`, `action` is `EXISTS` or `CREATED`. Typed Liquibase tags, created unguarded.
-2. `002-batch-metadata.xml`: Spring Batch metadata under prefix `PAI_BATCH_` (`initialize-schema: never`), loaded from `batch-metadata-pai.sql` via `<sqlFile>`.
+Liquibase master, pure changesets in calendar folders:
 
-**PAI no longer creates its read sources, and that is an ordering contract.** `000-bootstrap.xml` is
-deleted. It bootstrap-minted three relations PAI does not own, in unguarded raw-SQL blocks, so that
-PAI could run on a fresh database before their owners ever had: `tx_header` and `tx_entry` (PRR owns
-them, R-04 single writer) and `account`. PRR's baseline creates its two unguarded, so a PAI mint that
-won the race would crashloop PRR on "relation already exists"; the mint was also a hand-copied mirror
-nothing compared against the owner, so PAI's suite could stay green against a column set PRR had
-already changed. **PAI's migration must therefore run AFTER PRR's.** On a fresh `dcre_pay`, PAI
-migrating first now fails loudly and names the missing relation instead of inventing a wrong one.
-This is the retirement `collections/crg` performed first, copied rather than reinvented.
+1. `2026/07/001-pai.xml`: `pai_verdict`, `UNIQUE (arrival_id, sequence)`, `action` `EXISTS` or
+   `CREATED`. Typed tags, unguarded. PRW's eligibility gate counts rows in it.
+2. `2026/07/002-batch-metadata.xml`: Spring Batch metadata under prefix `PAI_BATCH_`, loaded from
+   `batch-metadata-pai.sql` via `<sqlFile>` with `IF NOT EXISTS` DDL and `validCheckSum ANY`.
+3. `2026/08/003-unknown-creditor.xml`: `unknown_creditor` (`account_number` VARCHAR(34) unique,
+   `arrival_id`, `created_at`). Typed tags, unguarded.
 
-**Open edge, recorded rather than left to be discovered:** nothing creates `account` in `dcre_pay`,
-because nothing should. A new `acs` service is being built to own it in its own `dcre_acs` database.
-`AccountRepo` still issues `INSERT INTO account` against the primary datasource, so PAI cannot
-complete a run against a real `dcre_pay` until `acs` ships and `AccountRepo` is repointed. That
-repointing is owned elsewhere and is deliberately not worked around here with a mint, because a mint
-is what put PAI's schema in the wrong database to begin with.
+**PAI creates none of its read sources.** The former `000-bootstrap.xml` minted `tx_header`,
+`tx_entry` and `account` so PAI could run on an empty database; it is deleted because a reader
+minting its writer's schema makes a race crashloop the owner and hides column drift. PAI's own
+migration touches only its three changesets; a RUN on a database where PRR and PTV have not yet
+migrated fails on the first query, naming the missing relation, and is relaunched.
 
-`pai_verdict` is the relation `prw` reads: `prw`'s `DueSql.DUE_GATES` counts rows in it against
-`dcre_pay`, and `001-pai.xml` is the only thing in the estate that creates it. That is why the
-`dcre_col` default was fatal rather than untidy.
+### Invariants
 
-Integration tests stand the read sources up from
-`src/test/resources/db/changelog/test/001-read-sources.xml`, reached through
-`db.changelog-test-master.xml`, which then runs the production master unchanged.
+- **Full-identity idempotency**: verdicts `INSERT ... ON CONFLICT (arrival_id, sequence) DO NOTHING`
+  (never `DO UPDATE`, so a rerun cannot flip `CREATED` to `EXISTS`; never CRDB `UPSERT INTO`, which
+  arbitrates on the PK only). Sightings `ON CONFLICT (account_number) DO NOTHING`.
+- **Bounded slices (SCRUM-42)**: verdicts commit per sequence slice (`REQUIRES_NEW`, keyset read
+  inside the slice transaction, `dcre.pai.verdict-slice-size`, default 10000). 40001 aborts retry in
+  a fresh transaction at slice level (`CrdbRetry`, 5 attempts, exponential backoff with jitter) and
+  at step level (`CrdbRetryExceptionHandler("PAI")`).
+- **Restart**: the JobRepository dedupes relaunches on the identifying `arrival.id`, and
+  `StaleExecutionSweeper.abandonStale(ds, "PAI_BATCH_", 60)` runs at `@Order(-10)` before launch so a
+  killed pod's stranded `STARTED` execution never blocks the relaunch (A-39a).
+- **Fail closed on a missing master**: `AccountRepo` is a read-only probe; a missing `account`
+  relation fails the run loudly rather than being worked around with a mint.
 
 ## Prerequisites
 
-- Java 25 (Gradle toolchain; wrapper is Gradle 9.5.1)
-- Docker (Testcontainers CockroachDB in tests; image builds)
-- Platform libs in Maven Local: `za.co.fnb.dcre:platform-batch:0.1.0` and `za.co.fnb.dcre:platform-persistence:0.1.0` (no remote repository)
+- Java 25: `.sdkmanrc` pins `java=25-tem`
+- Gradle 9.5.1 via the committed wrapper
+- Docker, for the Testcontainers suite and image builds
+- Platform libs in Maven Local (no remote repository): `za.co.fnb.dcre:platform-batch:0.1.0` and
+  `za.co.fnb.dcre:platform-persistence:0.1.0`
 
 ## Quickstart
 
@@ -89,20 +117,27 @@ Clean clone, no `.env`: committed defaults target `localhost:26257/dcre_pay`; en
 # 2. Build and test (Docker required)
 ./gradlew build
 
-# 3. One-shot run against a reachable CockroachDB
+# 3. One-shot run against a reachable CockroachDB where PRR and PTV have migrated
 java -jar build/libs/pai-2.0.jar arrival.id=<uuid>
 ```
 
 ## Configuration
+
+Precedence: `application.yml` default < environment variable.
 
 | Env var | Default | Purpose |
 |---|---|---|
 | `DCRE_DB_URL` | `jdbc:postgresql://localhost:26257/dcre_pay?sslmode=disable` | The payments CockroachDB via pgwire. AGT injects this exact name into every stage Job and routes the value per family. |
 | `DCRE_DB_USER` | `root` | DB user |
 | `DCRE_DB_PASSWORD` | (empty) | DB password |
+| `DCRE_AGTOPS_DB_URL` | `jdbc:postgresql://localhost:26257/agt_ops?sslmode=disable` | Heartbeat liveness stamp |
+| `DCRE_AGTOPS_DB_USER` / `DCRE_AGTOPS_DB_PASSWORD` | `root` / (empty) | Heartbeat credentials |
 | `DCRE_EXCHANGE_ROOT` | `../../../../../../infra/dcre-infra/exchange` | Outcome seam write only (no business file I/O, R-30) |
-| `DCRE_PAI_VERDICT_SLICE_SIZE` | `10000` | Verdict slice commit size (bounded transactions at 300k-tx arrivals) |
-| `JOB_NAME` | `local-<executionId>` | K8s-injected job identity; names the outcome seam file |
+| `DCRE_PAI_VERDICT_SLICE_SIZE` | `10000` | Verdict slice commit size |
+| `JOB_NAME` | unset: seam falls back to `local-pai-<executionId>` | K8s-injected job identity; names the outcome seam file |
+
+This table is the documented set, not a closed total: Spring Boot relaxed binding lets any property
+be overridden by its environment-variable form.
 
 ## Testing
 
@@ -110,22 +145,43 @@ java -jar build/libs/pai-2.0.jar arrival.id=<uuid>
 ./gradlew test
 ```
 
-Real behavior, no mocks: Testcontainers `cockroachdb/cockroach:v26.2.3`.
+Real behaviour, no mocks: Testcontainers `cockroachdb/cockroach:v26.2.3`. The read sources
+(`tx_header`, `tx_entry`, `account`) come from `src/test/resources/db/changelog/test/001-read-sources.xml`
+via `db.changelog-test-master.xml`, which then runs the production master unchanged.
 
-- `PaiJobTest`: end-to-end job run (3 known + 2 unknown creditors -> 3 `EXISTS` + 2 `CREATED`, exactly 2 accounts minted), then a rerun asserting verdict immutability and zero duplicate mints (R-05).
-- Cucumber BDD suite (`features/account-init.feature`, 6 scenarios): EXISTS/CREATED verdicts, rerun immutability, all-exist no-op (A-7), synthetic ENDO defaults on a minted account, mixed arrivals.
+- `PaiJobTest`: 3 known + 2 unknown creditors -> 3 `EXISTS` + 2 `CREATED`, `account` row count
+  unchanged, exactly 2 `unknown_creditor` rows; a rerun keeps verdicts immutable and records no
+  duplicate sighting (R-05). A second test pins the `local-pai-<executionId>` seam fallback.
+- `WritesOnlyWhatItOwnsTest`: no shipped statement writes a relation PAI does not own, the account
+  master is read and only read, and the shipped changelog creates exactly the owned relations.
+- `AgtWireContractTest`: PAI reads the `DCRE_DB_URL` name AGT injects (one-sided: it cannot see AGT).
+- `ConfigPrefixParityTest`: every defaulted `${dcre.pai.*}` placeholder is backed by a key in the
+  shipped yml, so a prefix rename cannot silently bind the constant default.
 - `AccountInitServiceSliceTest`: slice-by-slice commit ratchet and 40001 retry semantics.
-- `PaiJobConfigRetryTest`: proof the real `accountInitStep` retries a commit-time `TransientDataAccessException` in a fresh transaction.
+- `PaiJobConfigRetryTest`: the real `accountInitStep` retries a commit-time
+  `TransientDataAccessException` in a fresh transaction.
+- Cucumber (`CucumberSuiteTest`, `features/account-init.feature`): EXISTS and CREATED verdicts,
+  rerun immutability without duplicate sightings, all-exist no-op (A-7), sighting provenance, mixed
+  arrivals.
 
 ## Local cluster deployment
 
+This repo still carries a hand-written `Dockerfile` (`eclipse-temurin:25-jre-alpine` wrapping
+`build/libs/pai-2.0.jar`) and has no `bootBuildImage` configuration:
+
 ```bash
 ./gradlew bootJar
-docker build -t dcre-pai:2.1.1 .
-kind load docker-image --name dcre-dev dcre-pai:2.1.1
+docker build -t dcre-pai:2.0 .
+kind load docker-image --name dcre-dev dcre-pai:2.0
+kubectl set env -n dcre deploy/dcre-agt AGT_PAI_IMAGE=dcre-pai:2.0
 ```
 
-The image (`eclipse-temurin:25-jre-alpine`) wraps `build/libs/pai-2.0.jar`; the release version is carried by the image tag (digits-only SemVer fleet tags, current `2.1.1`). Once AGT gains `Stage.PAI` and `AGT_PAI_IMAGE` (see the rename-status table above; neither exists yet, so building this image does not by itself put it in the DAG), AGT will launch `dcre-pai` as an ephemeral K8s Job, passing the identifying `arrival.id` program argument and injecting `JOB_NAME`, with the image switched fleet-wide by `dcre-infra scripts/switch-version.sh`. The kind cluster and CockroachDB come from `dcre-infra scripts/kind-up.sh`; `scripts/env-reset.sh` gives a clean slate.
+The cluster comes from `dcre-infra` (`scripts/kind-up.sh`; `scripts/env-reset.sh` for a clean
+slate). AGT resolves the image from `AGT_PAI_IMAGE` (empty means launch-disabled);
+`scripts/switch-version.sh` does not export it (its roster still lists `AIS`, checked 2026-09-28),
+hence the explicit `kubectl set env`. AGT launches the Job in the `dcre-pay` namespace with the
+single identifying program arg `arrival.id=<uuid>` and env `JOB_NAME`, `DCRE_DB_URL` (the `dcre_pay`
+URL), `DCRE_EXCHANGE_ROOT=/exchange`, `DCRE_AGTOPS_DB_URL` and `DCRE_AGTOPS_DB_USER`.
 
 ## Related repositories
 
